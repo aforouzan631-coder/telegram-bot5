@@ -25,7 +25,9 @@ CREATE TABLE IF NOT EXISTS users(
 user_id INTEGER PRIMARY KEY,
 balance INTEGER DEFAULT 0,
 vip_until TEXT,
-msg_count INTEGER DEFAULT 0
+msg_count INTEGER DEFAULT 0,
+img_count INTEGER DEFAULT 0,
+invites INTEGER DEFAULT 0
 )
 """)
 
@@ -43,13 +45,26 @@ conn.commit()
 
 # ================= MENU =================
 menu = ReplyKeyboardMarkup([
-    ["💰 کیف پول"],
-    ["💸 ارسال پول"],
-    ["💎 خرید VIP"],
-    ["🤝 دعوت"],
     ["🤖 AI"],
-    ["💰 دلار", "🪙 طلا"]
+    ["💰 کیف پول", "💸 انتقال پول"],
+    ["🤝 دعوت دوستان"],
+    ["💎 خرید VIP"],
+    ["💰 دلار", "🪙 طلا"],
+    ["🎮 بازی"]
 ], resize_keyboard=True)
+
+# ================= VIP =================
+def set_vip(uid, days=30):
+    vip = datetime.now() + timedelta(days=days)
+    c.execute("UPDATE users SET vip_until=? WHERE user_id=?", (vip.isoformat(), uid))
+    conn.commit()
+
+def is_vip(uid):
+    c.execute("SELECT vip_until FROM users WHERE user_id=?", (uid,))
+    r = c.fetchone()
+    if not r or not r[0]:
+        return False
+    return datetime.fromisoformat(r[0]) > datetime.now()
 
 # ================= WALLET =================
 def balance(uid):
@@ -69,34 +84,21 @@ def remove_balance(uid, amount):
         return True
     return False
 
-# ================= VIP =================
-def set_vip(uid):
-    vip = datetime.now() + timedelta(days=30)
-    c.execute("UPDATE users SET vip_until=? WHERE user_id=?", (vip.isoformat(), uid))
-    conn.commit()
-
-def is_vip(uid):
-    c.execute("SELECT vip_until FROM users WHERE user_id=?", (uid,))
-    r = c.fetchone()
-    if not r or not r[0]:
-        return False
-    return datetime.fromisoformat(r[0]) > datetime.now()
-
 # ================= TRANSFER =================
-def transfer(sender, receiver, amount):
+def transfer(frm, to, amount):
     if amount <= 0:
         return "❌ مبلغ اشتباه"
 
-    if balance(sender) < amount:
+    if balance(frm) < amount:
         return "❌ موجودی کافی نیست"
 
-    remove_balance(sender, amount)
-    add_balance(receiver, amount)
+    remove_balance(frm, amount)
+    add_balance(to, amount)
 
     c.execute("""
     INSERT INTO transactions(from_user,to_user,amount,time)
     VALUES(?,?,?,?)
-    """, (sender, receiver, amount, datetime.now().isoformat()))
+    """, (frm, to, amount, datetime.now().isoformat()))
     conn.commit()
 
     return "✅ انتقال موفق"
@@ -107,7 +109,33 @@ def ai(text):
 
 # ================= START =================
 async def start(update: Update, context):
-    await update.message.reply_text("💎 BOT فعال شد", reply_markup=menu)
+    uid = update.effective_user.id
+
+    # referral
+    if context.args:
+        ref = int(context.args[0])
+        if ref != uid:
+            c.execute("UPDATE users SET invites = invites + 1 WHERE user_id=?", (ref,))
+            c.execute("UPDATE users SET msg_count = msg_count - 10 WHERE user_id=?", (ref,))
+            conn.commit()
+
+    await update.message.reply_text("💎 GOLD PRO MAX BOT", reply_markup=menu)
+
+# ================= PAYMENT =================
+def create_payment(uid):
+    data = {
+        "merchant_id": MERCHANT,
+        "amount": 50000,
+        "callback_url": f"{BASE_URL}/verify?user_id={uid}",
+        "description": "VIP GOLD"
+    }
+
+    r = requests.post(
+        "https://api.zarinpal.com/pg/v4/payment/request.json",
+        json=data
+    ).json()
+
+    return r
 
 # ================= HANDLE =================
 async def handle(update: Update, context):
@@ -119,30 +147,25 @@ async def handle(update: Update, context):
         await update.message.reply_text(f"💰 موجودی: {balance(uid)}")
         return
 
+    # TRANSFER
+    if text == "💸 انتقال پول":
+        await update.message.reply_text("📌 فرمت:\n123456 10000")
+        return
+
+    if text.replace(" ", "").isdigit() is False and " " in text:
+        try:
+            to, amount = map(int, text.split())
+            await update.message.reply_text(transfer(uid, to, amount))
+        except:
+            pass
+        return
+
     # VIP
     if text == "💎 خرید VIP":
-        if remove_balance(uid, 50000):
-            set_vip(uid)
-            await update.message.reply_text("👑 VIP فعال شد")
-        else:
-            await update.message.reply_text("❌ موجودی کافی نیست")
-        return
-
-    # TRANSFER
-    if text == "💸 ارسال پول":
-        await update.message.reply_text("📌 فرمت:\n/user_id amount\nمثال:\n123456 10000")
-        return
-
-    if text.startswith("/"):
-        try:
-            parts = text.replace("/", "").split()
-            to = int(parts[0])
-            amount = int(parts[1])
-
-            result = transfer(uid, to, amount)
-            await update.message.reply_text(result)
-        except:
-            await update.message.reply_text("❌ فرمت اشتباه")
+        pay = create_payment(uid)
+        if pay.get("data"):
+            url = "https://www.zarinpal.com/pg/StartPay/" + pay["data"]["authority"]
+            await update.message.reply_text("💳 پرداخت:\n" + url)
         return
 
     # AI
@@ -162,7 +185,37 @@ async def handle(update: Update, context):
         await update.message.reply_text("🪙 طلا: 3,200,000")
         return
 
+    if text == "🎮 بازی":
+        await update.message.reply_text("🎯 یک عدد 1 تا 5 بفرست")
+        return
+
     await update.message.reply_text("❓ دستور نامشخص")
+
+# ================= VERIFY =================
+from flask import Flask, request
+app = Flask(__name__)
+
+@app.route("/verify")
+def verify():
+    uid = int(request.args.get("user_id"))
+    authority = request.args.get("Authority")
+
+    data = {
+        "merchant_id": MERCHANT,
+        "authority": authority,
+        "amount": 50000
+    }
+
+    r = requests.post(
+        "https://api.zarinpal.com/pg/v4/payment/verify.json",
+        json=data
+    ).json()
+
+    if r.get("data", {}).get("code") == 100:
+        set_vip(uid, 30)
+        return "VIP ACTIVE"
+
+    return "FAILED"
 
 # ================= RUN =================
 app_bot = Application.builder().token(BOT_TOKEN).build()
