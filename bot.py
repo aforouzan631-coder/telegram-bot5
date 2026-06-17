@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import google.generativeai as genai
 
 # ================= AI =================
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key="YOUR_GEMINI_API_KEY")
 model = genai.GenerativeModel("gemini-1.5-pro")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
